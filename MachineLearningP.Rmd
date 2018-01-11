@@ -1,0 +1,224 @@
+---
+title: "Machine Learning Project"
+author: "alebj88"
+date: "9 de enero de 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warnings = FALSE)
+```
+
+## Executive Summary
+
+The goal of this project is to predict the manner in which the persons in study did the exercise. This is the "classe" variable in the training set and we will use the other variables to predict it. In the report we will describe how we built our model, how we used cross validation, what we think the expected out of sample error is, and why we made the choices we did. Finally we will use our prediction model to predict 20 different test cases.
+
+## Getting and Preprocessing Data.
+
+```{r Getting,results="hide",message=FALSE}
+library(caret)
+library(rpart)
+library(rattle)
+library("e1071")
+library(randomForest)
+
+#Import data sets.-----------------------------
+setwd("~/")
+training_Data <-read.csv("pml-training.csv", na.strings=c("NA","#DIV/0!",""))
+testing_Data <-read.csv("pml-testing.csv", na.strings=c("NA","#DIV/0!",""))
+
+#Remove conflicting variable
+training_Data<-training_Data[,-5] 
+
+#We take a sample for computational reasons
+training_Data<-training_Data[sample(1:nrow(training_Data),15000,replace=F),]
+
+#Creating the building and validation data sets.
+set.seed(1234)
+inBuild<-createDataPartition(training_Data$classe,p=0.7,list=FALSE)			
+buildData<-training_Data[inBuild,]
+validation<-training_Data[-inBuild,]
+
+#Creating training and testing data sets.
+inTrain <- createDataPartition(buildData$classe, p=0.7, list=FALSE)
+training <-buildData[inTrain, ]
+testing <- buildData[-inTrain, ]
+
+#Removing variables-----------------------------
+
+#Removing the first column
+training<-training[,-1]
+testing<-testing[,-1]
+validation<-validation[,-1]
+
+#Calculate the percentage of NA's per column.
+na<-apply(training,2,function(x)sum(is.na(x))/length(x)*100)
+naT<-apply(testing,2,function(x)sum(is.na(x))/length(x)*100)
+naV<-apply(validation,2,function(x)sum(is.na(x))/length(x)*100)
+
+#Remove columns that have high percentage of NA's.
+training<-training[,names(na[which(na<95)])]
+testing<-testing[,names(naT[which(naT<95)])]
+validation<-validation[,names(naV[which(naV<95)])]
+
+#Remove columns with low variability.
+training<-training[,nearZeroVar(training,saveMetrics=TRUE)$nzv==FALSE]
+testing<-testing[,nearZeroVar(testing,saveMetrics=TRUE)$nzv==FALSE]
+validation<-validation[,nearZeroVar(validation,saveMetrics=TRUE)$nzv==FALSE]
+```
+
+## Exploratory Analysis
+
+```{r exploratory}
+dim(testing)
+dim(training)
+dim(validation)
+```
+
+## Prediction with Support Vector Machine
+
+We create a Support Vector Machine model using the Convenience Tuning Wrapper Functions to optimize its parameters. We saw earlier that the best method is the "linear" method because it presented a lower error rate.
+
+```{r SVM}
+set.seed(1234)
+
+#kernel_name<-"radial"							
+kernel_name<-"linear"						
+#kernel_name<-"polynomial"					
+k<-kernel_name
+
+obj<-tune.svm(classe~.,data=training,gamma=10^(-3:1),cost=10^(-3:1),kernel=k)
+gamma<-obj$best.parameters$gamma
+cost <-obj$best.parameters$cost
+
+modFit1<-svm(classe~.,data=training,gamma=gamma,cost=cost,kernel=k)
+```
+
+### Evaluate Prediction
+
+We can see that the high accuracy of the model on the training set, could indicate the possible presence of overffiting. But when we notice that the difference between the accuracy of the model on the testing set and that is really small, we can conclude that this overffiting is not a real problem.  
+
+Statistics over the training set.
+
+```{r Eval SVM1}
+postResample(predict(modFit1),training$classe)
+```
+
+Statistics over the testing set.
+
+```{r Eval SVM2}
+postResample(predict(modFit1,testing),testing$classe)
+table(predict(modFit1,testing),testing$classe)
+```
+
+## Prediction with Random Forest
+
+We create a Random Forest model using 10-fold cross-validation to optimize its parameter (mtry).
+
+```{r RandomForest}
+#Random Forest.-------------------------------------
+set.seed(1234)
+p<-rfcv(training[,-57],training$classe,cv.fold=10,scale="log",step=0.7,
+    recursive=F)
+p<-as.numeric(names(p$error.cv[which.min(p$error.cv)]))
+
+#Setting train control
+CtrlP<-trainControl(method="cv",number=10,savePredictions=TRUE,classProbs=TRUE)
+
+#Setting grid Search
+pGrid<-expand.grid(mtry=c(p-2,p-1,p,p+1,p+2))
+
+#Build the model
+modFit2<-train(classe~.,data=training,method="rf",trControl=CtrlP,tuneGrid=pGrid)
+varImp(modFit2) 
+```
+
+### Evaluate prediction
+
+Here we can see the same result that we saw before in the SVM modeling. The overffiting againg is not a real problem. 
+
+Statistics over the training set.
+
+```{r Eval RF1}
+postResample(predict(modFit2),training$classe)
+```
+
+Statistics over the testing set.
+
+```{r Eval RF2}
+postResample(predict(modFit2,testing),testing$classe)
+table(predict(modFit2,testing),testing$classe)
+```
+
+## Prediction with the combination of the previous models.
+
+We can avoid overfitting and reduce the estimation error by combining models. This technique is very useful to improve the prediction.
+
+```{r Combined Model}
+set.seed(1234)
+##Building the new training data set
+pred1<-predict(modFit1,testing)
+pred2<-predict(modFit2,testing)
+trainingDF<-data.frame(pred1,pred2,classe=testing$classe)   #New training set. 
+
+#Creating the combined model
+#modFitComb<-train(classe~.,method="gbm",data=trainingDF)    
+
+##Building the new testing data set
+pred1V<-predict(modFit1,validation)							
+pred2V<-predict(modFit2,validation)							
+testingDF<-data.frame(pred1=pred1V,pred2=pred2V)            #New testing set.
+```
+
+```{r No Autoprint,echo=FALSE,results="hide"}
+#Creating the combined model
+modFitComb<-train(classe~.,method="gbm",data=trainingDF)   
+```
+
+### Evaluate the prediction in the Validation Set
+
+Here we can see the same result that we saw before in the SVM modeling. The overffiting again is not a real problem. 
+
+Statistics over the testing set (training set for the combined model).
+
+```{r Eval ModComb1}
+postResample(predict(modFitComb),testing$classe)
+```
+
+Statistics over the validation set (testing set for the combined model).
+
+```{r Eval ModComb2}
+confusionMatrix(predict(modFitComb,testingDF),validation$classe)
+```
+
+## Predicting Results on the Test Data
+
+```{r Aux, echo=FALSE}
+ac3<-postResample(predict(modFitComb,testingDF),validation$classe)[1]
+df<- 1-ac3
+```
+
+The combined model gave an Accuracy in the validation dataset of `r ac3`%. The expected out-of-sample error is 1 - `r ac3` = `r df` %. This implies that the model is good for predictions.
+
+```{r Final}
+dataset<-testing_Data[,names(training[,-57])]
+
+newPred1<-predict(modFit1,dataset)	
+newPred2<-predict(modFit2,dataset)	
+finalDF<-data.frame(pred1=newPred1,pred2=newPred2)
+pred<-predict(modFitComb,finalDF)
+pred
+```
+
+Write the predictions in txt files.
+
+```{r Writting txt}
+txtFile<- function(x){
+    for(i in 1:length(x)){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,
+                    col.names=FALSE)
+    }
+}
+txtFile(pred)
+```
